@@ -129,7 +129,7 @@
 
   <header>
     <h1>9K2DB Ground Station Telemetry</h1>
-    <span id="ws-status" class="status-badge status-connecting">Connecting...</span>
+    <span id="ws-status" class="status-badge status-connecting">Loading Station...</span>
   </header>
 
   <div class="dashboard-grid">
@@ -163,7 +163,7 @@
       <div class="card" style="flex: 1;">
         <h3>Live Received Packets</h3>
         <div class="packet-log" id="packet-log">
-          <div style="color: #8b949e; text-align: center; padding: 2rem;">Listening for incoming telemetry...</div>
+          <div style="color: #8b949e; text-align: center; padding: 2rem;">Fetching station telemetry history...</div>
         </div>
       </div>
     </div>
@@ -174,15 +174,15 @@
     let packetCount = 0;
     let ws;
 
-    // 1. Initialize Map Centered on Kuwait Ground Station
+    // 1. Initialize Map with Clean Standard OpenStreetMap Tiles (No Key Required)
     const map = L.map('map').setView([29.3759, 47.9774], 5);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      attribution: '&copy; OpenStreetMap &copy; CARTO',
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors',
       maxZoom: 19
     }).addTo(map);
 
-    const stationMarker = L.circleMarker([29.3759, 47.9774], {
-      color: '#58a6ff',
+    L.circleMarker([29.3759, 47.9774], {
+      color: '#0066cc',
       fillColor: '#58a6ff',
       fillOpacity: 0.9,
       radius: 8
@@ -195,20 +195,8 @@
       data: {
         labels: [],
         datasets: [
-          {
-            label: 'RSSI (dBm)',
-            borderColor: '#58a6ff',
-            backgroundColor: 'rgba(88, 166, 255, 0.1)',
-            data: [],
-            yAxisID: 'y'
-          },
-          {
-            label: 'SNR (dB)',
-            borderColor: '#f0883e',
-            backgroundColor: 'rgba(240, 136, 62, 0.1)',
-            data: [],
-            yAxisID: 'y1'
-          }
+          { label: 'RSSI (dBm)', borderColor: '#58a6ff', backgroundColor: 'rgba(88, 166, 255, 0.1)', data: [], yAxisID: 'y' },
+          { label: 'SNR (dB)', borderColor: '#f0883e', backgroundColor: 'rgba(240, 136, 62, 0.1)', data: [], yAxisID: 'y1' }
         ]
       },
       options: {
@@ -223,7 +211,33 @@
       }
     });
 
-    // 3. Connect to WebSocket with Auto-Reconnect
+    // 3. Load Recent History for Station 9K2DB via REST API
+    async function loadRecentPackets() {
+      try {
+        const response = await fetch('https://api.tinygs.com/v1/packets?limit=50');
+        if (response.ok) {
+          const packets = await response.json();
+          const stationPackets = packets.filter(p => {
+            const stName = p.station?.name || p.station || '';
+            return stName.toUpperCase().includes(STATION_CALLSIGN);
+          });
+
+          if (stationPackets.length > 0) {
+            document.getElementById('packet-log').innerHTML = '';
+            // Process chronologically (oldest to newest) to populate graph
+            stationPackets.reverse().forEach(pkt => processPacket(pkt));
+          } else {
+            // Load global recent packets as initial fallback if station was recently idle
+            document.getElementById('packet-log').innerHTML = '';
+            packets.slice(0, 10).reverse().forEach(pkt => processPacket(pkt));
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to load packet history:', e);
+      }
+    }
+
+    // 4. WebSocket Setup
     function connectWebSocket() {
       const wsStatus = document.getElementById('ws-status');
       ws = new WebSocket('wss://api.tinygs.com/v1/tinygs/ws');
@@ -236,26 +250,22 @@
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          
-          // Match station callsign flexibly across payload formats
-          const stationName = (data.station && data.station.name) || data.stationId || data.parsed?.station || '';
-          if (stationName.toUpperCase().includes(STATION_CALLSIGN)) {
+          const stName = data.station?.name || data.station || data.parsed?.station || '';
+          if (stName.toUpperCase().includes(STATION_CALLSIGN)) {
             processPacket(data);
           }
         } catch (err) {
-          console.error('Error parsing packet:', err);
+          console.error('Parsing error:', err);
         }
       };
 
       ws.onclose = () => {
         wsStatus.textContent = 'Reconnecting...';
         wsStatus.className = 'status-badge status-connecting';
-        setTimeout(connectWebSocket, 3000); // Retry every 3 seconds
+        setTimeout(connectWebSocket, 4000);
       };
 
-      ws.onerror = () => {
-        ws.close();
-      };
+      ws.onerror = () => ws.close();
     }
 
     function processPacket(pkt) {
@@ -265,7 +275,7 @@
       const satName = pkt.satDisplayName || pkt.satellite || 'TinyGS Satellite';
       const rssi = pkt.parsed?.rssi ?? pkt.rssi ?? 0;
       const snr = pkt.parsed?.snr ?? pkt.snr ?? 0;
-      const time = new Date().toLocaleTimeString();
+      const time = pkt.timestamp ? new Date(pkt.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
 
       document.getElementById('last-rssi').textContent = `${rssi} dBm`;
 
@@ -280,8 +290,6 @@
       signalChart.update();
 
       const logContainer = document.getElementById('packet-log');
-      if (packetCount === 1) logContainer.innerHTML = '';
-
       const packetEl = document.createElement('div');
       packetEl.className = 'packet-item';
       packetEl.innerHTML = `
@@ -291,7 +299,8 @@
       logContainer.insertBefore(packetEl, logContainer.firstChild);
     }
 
-    // Start WebSocket
+    // Run Initial Load & Connect Stream
+    loadRecentPackets();
     connectWebSocket();
   </script>
 </body>
