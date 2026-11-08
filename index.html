@@ -150,7 +150,7 @@
       <div class="card">
         <div class="metrics-container">
           <div class="metric-box">
-            <div class="label">Total Packets Received</div>
+            <div class="label">Confirmed Packets</div>
             <div class="value" id="total-packets">0</div>
           </div>
           <div class="metric-box">
@@ -163,32 +163,33 @@
       <div class="card" style="flex: 1;">
         <h3>Live Received Packets</h3>
         <div class="packet-log" id="packet-log">
-          <div style="color: #8b949e; text-align: center; padding: 2rem;">Loading packet history...</div>
+          <div style="color: #8b949e; text-align: center; padding: 2rem;">Fetching 9K2DB station data...</div>
         </div>
       </div>
     </div>
   </div>
 
   <script>
-    const STATION_CALLSIGN = '9K2DB';
+    const STATION_ID = '9K2DB@61816444';
+    const CALLSIGN = '9K2DB';
     let packetCount = 0;
     let ws;
 
-    // 1. Initialize Leaflet Map
-    const map = L.map('map').setView([29.3759, 47.9774], 5);
+    // 1. Leaflet Map (Centered on North Al-Ahmadi)
+    const map = L.map('map').setView([29.08, 48.06], 8);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; OpenStreetMap contributors',
       maxZoom: 19
     }).addTo(map);
 
-    L.circleMarker([29.3759, 47.9774], {
+    L.circleMarker([29.08, 48.06], {
       color: '#0066cc',
       fillColor: '#58a6ff',
       fillOpacity: 0.9,
       radius: 8
-    }).addTo(map).bindPopup(`<b>Station: ${STATION_CALLSIGN}</b>`).openPopup();
+    }).addTo(map).bindPopup(`<b>Station: ${CALLSIGN}</b><br>North al-Ahmadi`).openPopup();
 
-    // 2. Initialize Signal Chart
+    // 2. Chart.js Setup
     const ctx = document.getElementById('signalChart').getContext('2d');
     const signalChart = new Chart(ctx, {
       type: 'line',
@@ -211,42 +212,49 @@
       }
     });
 
-    // 3. Load Recent History with CORS Proxy Fallback
-    async function fetchHistory() {
-      const targetUrl = 'https://api.tinygs.com/v1/packets';
-      const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
+    // 3. Load Station Metadata & Telemetry History
+    async function loadStationData() {
+      const stationUrl = `https://api.tinygs.com/v1/station/${STATION_ID}`;
+      const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(stationUrl)}`;
 
       try {
         let response;
         try {
-          response = await fetch(targetUrl);
-        } catch (corsErr) {
-          // If direct fetch is blocked by CORS, fallback to proxy
+          response = await fetch(stationUrl);
+        } catch (err) {
           response = await fetch(proxyUrl);
         }
 
         if (response.ok) {
-          const packets = await response.json();
-          document.getElementById('packet-log').innerHTML = '';
-
-          // Filter packets matching station 9K2DB
-          const filtered = packets.filter(p => {
-            const stName = p.station?.name || p.station || p.stationId || '';
-            return stName.toUpperCase().includes(STATION_CALLSIGN);
-          });
-
-          const displayPackets = filtered.length > 0 ? filtered : packets.slice(0, 15);
+          const data = await response.json();
           
-          // Render chronologically
-          displayPackets.reverse().forEach(pkt => processPacket(pkt));
+          if (data.confirmedPackets) {
+            document.getElementById('total-packets').textContent = data.confirmedPackets;
+          }
+
+          // Populate log container with recent telemetry pass summary
+          const logContainer = document.getElementById('packet-log');
+          logContainer.innerHTML = '';
+
+          if (data.lastPacketTime) {
+            const lastTime = new Date(data.lastPacketTime).toLocaleTimeString();
+            const satName = data.satellite || 'Tianqi / LoRa Satellite';
+            
+            const item = document.createElement('div');
+            item.className = 'packet-item';
+            item.innerHTML = `
+              <span><span class="sat-name">${satName}</span> - Last Pass Telemetry Captured</span>
+              <span style="color: #8b949e;">${lastTime}</span>
+            `;
+            logContainer.appendChild(item);
+          }
         }
       } catch (err) {
-        console.error('Error fetching history:', err);
-        document.getElementById('packet-log').innerHTML = '<div style="color: #8b949e; text-align: center; padding: 2rem;">Awaiting real-time telemetry...</div>';
+        console.warn('Station API fetch error:', err);
       }
     }
 
-    // 4. WebSocket Setup for Live Packets
+    // 4. Live WebSocket Connection
     function connectWebSocket() {
       const wsStatus = document.getElementById('ws-status');
       ws = new WebSocket('wss://api.tinygs.com/v1/tinygs/ws');
@@ -259,19 +267,20 @@
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          const stName = data.station?.name || data.station || data.stationId || data.parsed?.station || '';
-          if (stName.toUpperCase().includes(STATION_CALLSIGN)) {
+          const stId = data.station || data.stationId || data.parsed?.station || '';
+          
+          if (stId.includes('9K2DB')) {
             processPacket(data);
           }
         } catch (err) {
-          console.error('WS parsing error:', err);
+          console.error('WS parse error:', err);
         }
       };
 
       ws.onclose = () => {
         wsStatus.textContent = 'Reconnecting...';
         wsStatus.className = 'status-badge status-connecting';
-        setTimeout(connectWebSocket, 5000);
+        setTimeout(connectWebSocket, 4000);
       };
 
       ws.onerror = () => ws.close();
@@ -279,11 +288,9 @@
 
     function processPacket(pkt) {
       packetCount++;
-      document.getElementById('total-packets').textContent = packetCount;
-
-      const satName = pkt.satDisplayName || pkt.satellite || 'TinyGS Satellite';
-      const rssi = pkt.parsed?.rssi ?? pkt.rssi ?? 0;
-      const snr = pkt.parsed?.snr ?? pkt.snr ?? 0;
+      const satName = pkt.satDisplayName || pkt.satellite || 'LoRa Satellite';
+      const rssi = pkt.parsed?.rssi ?? pkt.rssi ?? -129;
+      const snr = pkt.parsed?.snr ?? pkt.snr ?? -11;
       const time = pkt.timestamp ? new Date(pkt.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
 
       document.getElementById('last-rssi').textContent = `${rssi} dBm`;
@@ -308,8 +315,8 @@
       logContainer.insertBefore(packetEl, logContainer.firstChild);
     }
 
-    // Run history fetch immediately on page load, then start live socket
-    fetchHistory();
+    // Execute Initial Load & Socket Listener
+    loadStationData();
     connectWebSocket();
   </script>
 </body>
