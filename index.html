@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>9K2DB - TinyGS Ground Station Dashboard</title>
+
+  <!-- Leaflet CSS & JS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <style>
+    :root {
+      --bg-color: #0d1117;
+      --card-bg: #161b22;
+      --border-color: #30363d;
+      --text-color: #c9d1d9;
+      --accent-color: #58a6ff;
+      --accent-orange: #f0883e;
+      --success-color: #3fb950;
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg-color);
+      color: var(--text-color);
+    }
+
+    header {
+      background-color: var(--card-bg);
+      padding: 1rem 1.5rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.25rem;
+      color: var(--accent-color);
+    }
+
+    .status-badge {
+      padding: 0.25rem 0.75rem;
+      border-radius: 12px;
+      font-size: 0.85rem;
+      font-weight: bold;
+      background-color: #21262d;
+      border: 1px solid var(--border-color);
+    }
+
+    .status-online { color: var(--success-color); border-color: var(--success-color); }
+    .status-connecting { color: var(--accent-orange); border-color: var(--accent-orange); }
+
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      grid-gap: 1rem;
+      padding: 1rem;
+      box-sizing: border-box;
+      max-width: 1600px;
+      margin: 0 auto;
+    }
+
+    .card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 1rem;
+    }
+
+    #map {
+      height: 400px;
+      border-radius: 4px;
+      background-color: #010409;
+    }
+
+    .metrics-container {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+
+    .metric-box {
+      background-color: #21262d;
+      padding: 1rem;
+      border-radius: 6px;
+      text-align: center;
+    }
+
+    .metric-box .label { font-size: 0.8rem; color: #8b949e; }
+    .metric-box .value { font-size: 1.5rem; font-weight: bold; color: var(--accent-color); margin-top: 0.25rem; }
+
+    .chart-container {
+      position: relative;
+      height: 220px;
+    }
+
+    .packet-log {
+      height: 380px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 0.85rem;
+    }
+
+    .packet-item {
+      padding: 0.5rem;
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .packet-item:nth-child(even) { background-color: #0d1117; }
+    .sat-name { color: var(--accent-orange); font-weight: bold; }
+
+    @media (max-width: 900px) {
+      .dashboard-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>9K2DB Ground Station Telemetry</h1>
+    <span id="ws-status" class="status-badge status-connecting">Connecting...</span>
+  </header>
+
+  <div class="dashboard-grid">
+    <!-- Left Column: Map & Graphs -->
+    <div style="display: flex; flex-direction: column; gap: 1rem;">
+      <div class="card">
+        <div id="map"></div>
+      </div>
+
+      <div class="card">
+        <h3>Signal Strength (RSSI / SNR)</h3>
+        <div class="chart-container">
+          <canvas id="signalChart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Column: Metrics & Live Log -->
+    <div style="display: flex; flex-direction: column; gap: 1rem;">
+      <div class="card">
+        <div class="metrics-container">
+          <div class="metric-box">
+            <div class="label">Total Packets Received</div>
+            <div class="value" id="total-packets">0</div>
+          </div>
+          <div class="metric-box">
+            <div class="label">Last Received RSSI</div>
+            <div class="value" id="last-rssi">-- dBm</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="flex: 1;">
+        <h3>Live Received Packets</h3>
+        <div class="packet-log" id="packet-log">
+          <div style="color: #8b949e; text-align: center; padding: 2rem;">Listening for incoming satellite passes...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const STATION_CALLSIGN = '9K2DB';
+    let packetCount = 0;
+
+    // 1. Initialize Map (Centered near Kuwait)
+    const map = L.map('map').setView([29.3759, 47.9774], 4);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      attribution: '&copy; OpenStreetMap &copy; CARTO',
+      maxZoom: 19
+    }).addTo(map);
+
+    // Add Ground Station Marker
+    const stationMarker = L.circleMarker([29.3759, 47.9774], {
+      color: '#58a6ff',
+      fillColor: '#58a6ff',
+      fillOpacity: 0.8,
+      radius: 8
+    }).addTo(map).bindPopup(`<b>Station: ${STATION_CALLSIGN}</b>`);  // 2. Initialize Signal Chart const ctx = document.getElementById('signalChart').getContext('2d'); const signalChart = new Chart(ctx, { type: 'line', data: { labels: [], datasets: [ { label: 'RSSI (dBm)', borderColor: '#58a6ff', backgroundColor: 'rgba(88, 166, 255, 0.1)', data: [], yAxisID: 'y' }, { label: 'SNR (dB)', borderColor: '#f0883e', backgroundColor: 'rgba(240, 136, 62, 0.1)', data: [], yAxisID: 'y1' } ] }, options: { responsive: true, maintainAspectRatio: false, scales: { x: { ticks: { color: '#8b949e' }, grid: { color: '#30363d' } }, y: { type: 'linear', position: 'left', ticks: { color: '#58a6ff' }, grid: { color: '#30363d' } }, y1: { type: 'linear', position: 'right', ticks: { color: '#f0883e' }, grid: { drawOnChartArea: false } } }, plugins: { legend: { labels: { color: '#c9d1d9' } } } } });  // 3. Connect to TinyGS WebSocket Stream const wsStatus = document.getElementById('ws-status'); const socket = new WebSocket('wss://api.tinygs.com/v1/tinygs/ws');  socket.onopen = () => { wsStatus.textContent = 'Live Feed Connected'; wsStatus.className = 'status-badge status-online'; };  socket.onmessage = (event) => { try { const data = JSON.parse(event.data);  // Filter packets received by station 9K2DB if (data.station && data.station.name.includes(STATION_CALLSIGN)) { processPacket(data); } } catch (err) { console.error('Error parsing packet data:', err); } };  socket.onclose = () => { wsStatus.textContent = 'Disconnected'; wsStatus.className = 'status-badge status-connecting'; };  function processPacket(pkt) { packetCount++; document.getElementById('total-packets').textContent = packetCount;  const satName = pkt.satDisplayName \vert{}\vert{} pkt.satellite \vert{}\vert{} 'Unknown Satellite'; const rssi = pkt.parsed.rssi \vert{}\vert{} 0; const snr = pkt.parsed.snr \vert{}\vert{} 0; const time = new Date().toLocaleTimeString();  document.getElementById('last-rssi').textContent = `${rssi} dBm`;
+
+      // Update Chart Data
+      if (signalChart.data.labels.length > 15) {
+        signalChart.data.labels.shift();
+        signalChart.data.datasets[0].data.shift();
+        signalChart.data.datasets[1].data.shift();
+      }
+      signalChart.data.labels.push(time);
+      signalChart.data.datasets[0].data.push(rssi);
+      signalChart.data.datasets[1].data.push(snr);
+      signalChart.update();
+
+      // Log Packet in UI
+      const logContainer = document.getElementById('packet-log');
+      if (packetCount === 1) logContainer.innerHTML = ''; // Clear placeholder
+
+      const packetEl = document.createElement('div');
+      packetEl.className = 'packet-item';
+      packetEl.innerHTML = `
+        <span><span class="sat-name">${satName}</span> - RSSI: ${rssi} dBm \vert{} SNR:${snr} dB</span>
+        <span style="color: #8b949e;">${time}</span>
+      `;
+      logContainer.insertBefore(packetEl, logContainer.firstChild);
+    }
+  </script>
+</body>
+</html>
