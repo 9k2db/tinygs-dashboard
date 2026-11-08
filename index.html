@@ -163,7 +163,7 @@
       <div class="card" style="flex: 1;">
         <h3>Live Received Packets</h3>
         <div class="packet-log" id="packet-log">
-          <div style="color: #8b949e; text-align: center; padding: 2rem;">Fetching station telemetry history...</div>
+          <div style="color: #8b949e; text-align: center; padding: 2rem;">Loading packet history...</div>
         </div>
       </div>
     </div>
@@ -174,7 +174,7 @@
     let packetCount = 0;
     let ws;
 
-    // 1. Initialize Map with Clean Standard OpenStreetMap Tiles (No Key Required)
+    // 1. Initialize Leaflet Map
     const map = L.map('map').setView([29.3759, 47.9774], 5);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; OpenStreetMap contributors',
@@ -211,33 +211,42 @@
       }
     });
 
-    // 3. Load Recent History for Station 9K2DB via REST API
-    async function loadRecentPackets() {
+    // 3. Load Recent History with CORS Proxy Fallback
+    async function fetchHistory() {
+      const targetUrl = 'https://api.tinygs.com/v1/packets';
+      const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
+
       try {
-        const response = await fetch('https://api.tinygs.com/v1/packets?limit=50');
+        let response;
+        try {
+          response = await fetch(targetUrl);
+        } catch (corsErr) {
+          // If direct fetch is blocked by CORS, fallback to proxy
+          response = await fetch(proxyUrl);
+        }
+
         if (response.ok) {
           const packets = await response.json();
-          const stationPackets = packets.filter(p => {
-            const stName = p.station?.name || p.station || '';
+          document.getElementById('packet-log').innerHTML = '';
+
+          // Filter packets matching station 9K2DB
+          const filtered = packets.filter(p => {
+            const stName = p.station?.name || p.station || p.stationId || '';
             return stName.toUpperCase().includes(STATION_CALLSIGN);
           });
 
-          if (stationPackets.length > 0) {
-            document.getElementById('packet-log').innerHTML = '';
-            // Process chronologically (oldest to newest) to populate graph
-            stationPackets.reverse().forEach(pkt => processPacket(pkt));
-          } else {
-            // Load global recent packets as initial fallback if station was recently idle
-            document.getElementById('packet-log').innerHTML = '';
-            packets.slice(0, 10).reverse().forEach(pkt => processPacket(pkt));
-          }
+          const displayPackets = filtered.length > 0 ? filtered : packets.slice(0, 15);
+          
+          // Render chronologically
+          displayPackets.reverse().forEach(pkt => processPacket(pkt));
         }
-      } catch (e) {
-        console.warn('Failed to load packet history:', e);
+      } catch (err) {
+        console.error('Error fetching history:', err);
+        document.getElementById('packet-log').innerHTML = '<div style="color: #8b949e; text-align: center; padding: 2rem;">Awaiting real-time telemetry...</div>';
       }
     }
 
-    // 4. WebSocket Setup
+    // 4. WebSocket Setup for Live Packets
     function connectWebSocket() {
       const wsStatus = document.getElementById('ws-status');
       ws = new WebSocket('wss://api.tinygs.com/v1/tinygs/ws');
@@ -250,19 +259,19 @@
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          const stName = data.station?.name || data.station || data.parsed?.station || '';
+          const stName = data.station?.name || data.station || data.stationId || data.parsed?.station || '';
           if (stName.toUpperCase().includes(STATION_CALLSIGN)) {
             processPacket(data);
           }
         } catch (err) {
-          console.error('Parsing error:', err);
+          console.error('WS parsing error:', err);
         }
       };
 
       ws.onclose = () => {
         wsStatus.textContent = 'Reconnecting...';
         wsStatus.className = 'status-badge status-connecting';
-        setTimeout(connectWebSocket, 4000);
+        setTimeout(connectWebSocket, 5000);
       };
 
       ws.onerror = () => ws.close();
@@ -299,8 +308,8 @@
       logContainer.insertBefore(packetEl, logContainer.firstChild);
     }
 
-    // Run Initial Load & Connect Stream
-    loadRecentPackets();
+    // Run history fetch immediately on page load, then start live socket
+    fetchHistory();
     connectWebSocket();
   </script>
 </body>
